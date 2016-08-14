@@ -46,7 +46,6 @@ import android.media.AudioRecord;
 import android.media.AudioSystem;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
-import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
@@ -62,7 +61,6 @@ import android.util.Log;
 
 import com.android.fmradio.FmStation.Station;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -179,7 +177,7 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     private Context mContext = null;
     private AudioManager mAudioManager = null;
     private ActivityManager mActivityManager = null;
-    private MediaPlayer mFmPlayer = null;
+    //private MediaPlayer mFmPlayer = null;
     private WakeLock mWakeLock = null;
     // Audio focus is held or not
     private boolean mIsAudioFocusHeld = false;
@@ -1249,11 +1247,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
         mWakeLock.setReferenceCounted(false);
         sRecordingSdcard = FmUtils.getDefaultStoragePath();
 
-        if (!initFmPlayer()) {
-            Log.e(TAG, "FMPlayer init failed");
-            return;
-        }
-
         registerFmBroadcastReceiver();
         registerSdcardReceiver();
         registerAudioPortUpdateListener();
@@ -1269,62 +1262,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
         initAudioRecordSink();
         createRenderThread();
     }
-
-    private boolean initFmPlayer() {
-        mFmPlayer = new MediaPlayer();
-        mFmPlayer.setWakeMode(FmService.this, PowerManager.PARTIAL_WAKE_LOCK);
-        mFmPlayer.setOnErrorListener(mPlayerErrorListener);
-        try {
-            mFmPlayer.setDataSource("MEDIATEK://MEDIAPLAYER_PLAYERTYPE_FM");
-        } catch (Exception ex) {
-            Log.e(TAG, "setDataSource: " + ex);
-            return false;
-        }
-        mFmPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
-        return true;
-    }
-
-    /**
-     * Handle FM Player error
-     */
-    private final MediaPlayer.OnErrorListener mPlayerErrorListener =
-            new MediaPlayer.OnErrorListener() {
-                /**
-                 * handle error message
-                 *
-                 * @param mp occurred error media player
-                 * @param what error message
-                 * @param extra error message extra
-                 *
-                 * @return handle error message or not
-                 */
-                public boolean onError(MediaPlayer mp, int what, int extra) {
-                    if (MediaPlayer.MEDIA_ERROR_SERVER_DIED == what) {
-                        Log.d(TAG, "onError: MEDIA_SERVER_DIED");
-                        if (mFmPlayer != null) {
-                            mFmPlayer.release();
-                            mFmPlayer = null;
-                        }
-                        mFmPlayer = new MediaPlayer();
-                        mFmPlayer.setWakeMode(FmService.this, PowerManager.PARTIAL_WAKE_LOCK);
-                        mFmPlayer.setOnErrorListener(mPlayerErrorListener);
-                        try {
-                            mFmPlayer.setDataSource("MEDIATEK://MEDIAPLAYER_PLAYERTYPE_FM");
-                            mFmPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
-                            if (mPowerStatus == POWER_UP) {
-                                setSpeakerPhoneOn(mIsSpeakerUsed);
-                                mFmPlayer.prepare();
-                                mFmPlayer.start();
-                            }
-                        } catch (Exception ex) {
-                            Log.e(TAG, "setDataSource: " + ex);
-                            return false;
-                        }
-                    }
-
-                    return true;
-                }
-            };
 
     private void registerAudioPortUpdateListener() {
         if (mAudioPortUpdateListener == null) {
@@ -1707,24 +1644,33 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      * @param enable true, open FM audio; false, close FM audio;
      */
     private void enableFmAudio(boolean enable) {
-        if ((mFmPlayer == null) || mPowerStatus != POWER_UP) {
-            return;
-        }
-
-        try {
-            if (!enable) {
-                if (!mFmPlayer.isPlaying()) return;
-
-                mFmPlayer.stop();
+        if (enable) {
+            if ((mPowerStatus != POWER_UP) || !mIsAudioFocusHeld) {
+                Log.d(TAG, "enableFmAudio, current not available return.mIsAudioFocusHeld:"
+                    + mIsAudioFocusHeld);
                 return;
             }
 
-            if (mFmPlayer.isPlaying()) return;
-
-            mFmPlayer.prepareWithoutScan();
-            mFmPlayer.start();
-        } catch (Exception e) {
-            Log.e(TAG, "Exception: ", e);
+            startAudioTrack();
+            ArrayList<AudioPatch> patches = new ArrayList<AudioPatch>();
+            mAudioManager.listAudioPatches(patches);
+            if (mAudioPatch == null) {
+                if (isPatchMixerToEarphone(patches)) {
+                    int status;
+                    stopAudioTrack();
+                    stopRender();
+                    status = createAudioPatch();
+                    if (status != AudioManager.SUCCESS){
+                       Log.d(TAG, "enableFmAudio: fallback as createAudioPatch failed");
+                       startRender();
+                    }
+                } else {
+                    startRender();
+                }
+            }
+        } else {
+            releaseAudioPatch();
+            stopRender();
         }
     }
 
@@ -2416,12 +2362,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                     }
                     powerDown();
                     closeDevice();
-
-                    // release FMPlayer
-                    if (mFmPlayer != null) {
-                        mFmPlayer.release();
-                        mFmPlayer = null;
-                    }
 
                     bundle = new Bundle(1);
                     bundle.putInt(FmListener.CALLBACK_FLAG, FmListener.MSGID_FM_EXIT);
